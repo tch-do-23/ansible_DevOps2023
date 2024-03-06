@@ -1,0 +1,276 @@
+---
+- name: Install docker-ce on k8s nodes
+  hosts: k8s-rh9-all:children
+  become: true
+
+  tasks:
+    - name: Remove docker
+      package:
+        name: docker
+        state: absent
+      loop:
+        - docker
+        - docker-client
+        - docker-client-latest
+        - docker-common
+        - docker-latest
+        - docker-latest-logrotate
+        - docker-logrotate
+        - docker-engine
+
+    - name: Install yum utils which provides yum-config-manager utility in the next task
+      dnf:
+        name: yum-utils
+        state: present
+
+    - name: Add Docker YUM Repository
+      yum_repository:
+        name: docker-ce-stable
+        description: Docker CE Stable - $basearch
+        baseurl: https://download.docker.com/linux/centos/9/$basearch/stable
+        gpgcheck: yes
+        gpgkey: https://download.docker.com/linux/centos/gpg
+        state: present
+
+    - name: Install docker
+      yum:
+        name: "{{ item }}"
+        state: latest
+        update_cache: true
+      loop:
+        - docker-ce
+        - docker-ce-cli
+        - containerd.io
+        - docker-buildx-plugin
+        - docker-compose-plugin
+
+    - name: Start & enable docker
+      service:
+        name: "docker"
+        enabled: true
+        state: started
+          
+  handlers:
+    - name: Start & enable docker
+      service:
+        name: docker
+        state: restarted
+        enabled: yes
+
+#############################################################
+- name: install cri-dockerd on k8s-nodes
+  hosts: k8s-rh9-all:children
+  become: true
+  vars:
+    mydir: "/home/ec2-user"
+    work_dir: "/home/ec2-user/ansible_DevOps2022"
+    temp_cri_dockerd: "/home/ec2-user/ansible_DevOps2022/cri-dockerd"
+
+  tasks:
+    - name: Install required for below packages
+      yum:
+        name: "{{ item }}"
+        state: latest
+        update_cache: true
+      loop:
+        - git
+        - wget
+        - curl
+        
+    - name: Creating ansible_DevOps2022 working directory
+      become: no
+      become_user: ec2-user
+      file:
+        path: "{{ mydir }}/ansible_DevOps2022"
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: '0755'
+
+    - name: Downloading cri-dockerd binary
+      ansible.builtin.get_url:
+        url: https://github.com/Mirantis/cri-dockerd/releases/download/v0.3.8/cri-dockerd-0.3.8.amd64.tgz
+        dest: "{{ work_dir }}"
+
+    - name: Untarring just downloaded cri-dockerd 
+      ansible.builtin.unarchive: 
+        src: "{{ work_dir }}/cri-dockerd-0.3.8.amd64.tgz"
+        dest: "{{ work_dir }}"
+        remote_src: yes
+
+    - name: Creating a dir for cri-dockerd installation
+      ansible.builtin.file:
+        path: /usr/local/bin
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Installing cri-dockerd 
+      ansible.builtin.shell: 
+        chdir: "{{ temp_cri_dockerd }}"
+        cmd: sudo install -o root -g root -m 0755 cri-dockerd /usr/local/bin/cri-dockerd
+
+    - name: Cleaning up temporary cri-dockerd from working dir
+      ansible.builtin.shell: 
+        chdir: "{{ work_dir }}"
+        cmd: rm -rf cri-dockerd*
+
+    - name: Cloning cri-dockerd service files & auto creating a temp_cri-dockerd again
+      ansible.builtin.git:
+        repo: https://github.com/Mirantis/cri-dockerd.git
+        dest: "{{ work_dir }}/cri-dockerd"
+
+    - name: Installing cri-dockerd service files
+      ansible.builtin.shell:
+        chdir: "{{ temp_cri_dockerd }}"
+        cmd: sudo install packaging/systemd/* /etc/systemd/system
+
+    - name: Editing a file using scripts
+      ansible.builtin.shell:
+        cmd: sudo sed -i -e 's,/usr/bin/cri-dockerd,/usr/local/bin/cri-dockerd,' /etc/systemd/system/cri-docker.service
+    
+    - name: Cleaning up temporary cri-dockerd from working dir
+      ansible.builtin.shell: 
+        chdir: "{{ work_dir }}"
+        cmd: rm -rf cri-dockerd*
+
+    - name: Put SELinux in permissive mode, logging actions that would be blocked.
+      ansible.posix.selinux:
+        policy: targeted
+        state: permissive
+
+    - name: Ensure SELinux is set to permissive mode
+      ansible.builtin.lineinfile:
+        path: /etc/selinux/config
+        regexp: '^SELINUX='
+        line: SELINUX=permissive
+
+    - name: Just force systemd to reread configs (2.4 and above)
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    - name: Enable cri-docker.service
+      ansible.builtin.systemd_service:
+        name: cri-docker.service
+        enabled: true
+
+    - name: Enable and start cri-docker.socket
+      ansible.builtin.systemd_service:
+        name: cri-docker.socket
+        state: started
+        enabled: true
+
+#############################################################
+- name: Install k8s repo, stop swap and firewalld
+  hosts: k8s-rh9-all:children
+  become: true
+
+  tasks:
+    - name: Create k8s config, this will overwrite existing configs in /etc/yum.repos.d/kubernetes.repo
+      yum_repository:
+        name: kube
+        description: Kubernetes repo
+        baseurl: https://pkgs.k8s.io/core:/stable:/v1.28/rpm/ #https://packages.cloud.google.com/yum/repos/kubernetes-el9-$basearch
+        enabled: 1
+        gpgcheck: 1
+        gpgkey: https://pkgs.k8s.io/core:/stable:/v1.28/rpm/repodata/repomd.xml.key #https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+
+    - name: Remove swapfile from /etc/fstab
+      mount:
+        name: "{{ item }}"
+        fstype: swap
+        state: absent
+      with_items:
+        - swap
+        - none
+
+    - name: Disable swap
+      shell: |
+              swapoff -a
+              sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+
+    - name: 'Populate service facts'
+      service_facts:
+
+    - name: 'Disable firewalld Services'
+      service:
+        name: "{{item}}"
+        state: stopped
+        enabled: no
+      loop:
+      - firewalld
+      when: ansible_facts.services[item] is defined
+      ignore_errors: yes
+
+################################################################################
+- name: Installing and starting kubelet on master nodes (control planes)
+  hosts: k8s-m-rh9
+  become: true
+  # vars:
+  #   node_ip: "192.168.0.50"
+
+  tasks:
+# https://kubernetes.io/blog/2019/03/15/kubernetes-setup-using-ansible-and-vagrant/
+    - name: Install Kubernetes binaries with disable_excludes
+      become: true
+      ansible.builtin.yum: 
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+        disable_excludes: 'kubernetes'
+      loop:
+          - kubelet 
+          - kubeadm 
+          - kubectl
+
+    # - name: Configure node ip
+    #   lineinfile:
+    #     path: /etc/default/kubelet
+    #     line: KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}
+
+    - name: Restart kubelet
+      service:
+        name: kubelet
+        enabled: true
+        daemon_reload: yes
+        state: restarted
+
+    - name: Enabling kubectl command for general user
+      become: yes
+      become_user: ec2-user
+      file:
+        path: $HOME/.kube
+        state: directory
+        mode: 0755
+
+################################################################################
+- name: Installing and starting kubelet on worker nodes
+  hosts: k8s-w-rh9
+  become: true
+  # vars:
+  #   node_ip: "192.68.0.51" 
+
+  tasks:
+    - name: Install Kubernetes binaries with disable_excludes
+      become: true
+      ansible.builtin.yum: 
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+        disable_excludes: 'kubernetes'
+      loop:
+          - kubelet 
+          - kubeadm 
+
+    # - name: Configure node ip
+    #   lineinfile:
+    #     path: /etc/default/kubelet
+    #     line: KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}
+
+    - name: Restart kubelet
+      service:
+        name: kubelet
+        enabled: true
+        daemon_reload: yes
+        state: restarted

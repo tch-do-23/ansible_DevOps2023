@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: java-app
+  labels:
+    app: final-project
+spec:  
+  selector:
+    matchLabels:
+      app: final-project
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: final-project
+    spec:
+      containers:
+      - name: java-app
+        image: turancyberhub23/my-java-app:v3
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080

@@ -1,0 +1,93 @@
+---
+- name: Install Jenkins and Docker
+  hosts: jenkins_server 
+  become: yes
+  become_user: root
+
+
+  tasks:
+    - name: Update package repo
+      yum:
+        name: '*'
+        state: latest
+
+    - name: Install Java OpenJDK 
+      yum:
+       name: java-11-openjdk.x86_64
+       state: present
+  
+
+- name: Install Git 
+  hosts: jenkins_server
+  become: yes
+  tasks:
+    - name: Update all package 
+      yum:
+        name: "*"
+        state: latest 
+
+    - name: Install Git
+      yum:
+        name: git
+        state: present
+
+
+    - name: Add Jenkins YUM Repository
+      yum_repository:
+        name: jenkins
+        description: Jenkins Official Repository
+        baseurl: https://pkg.jenkins.io/redhat-stable
+        gpgcheck: yes
+        gpgkey: https://pkg.jenkins.io/redhat-stable/jenkins.io.key
+        state: present
+
+    - name: Install Jenkins
+      package:
+        name: jenkins
+        state: present
+
+    - name: Start Jenkins service
+      systemd:
+        name: jenkins
+        state: started
+        enabled: yes
+
+    - name: Update package cache
+      yum:
+        update_cache: yes
+
+    - name: Install Docker Prerequisites
+      package:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - yum-utils
+        - device-mapper-persistent-data
+        - lvm2
+
+    - name: Add Docker YUM Repository
+      yum_repository:
+        name: docker-ce-stable
+        description: Docker CE Stable - $basearch
+        baseurl: https://download.docker.com/linux/centos/9/$basearch/stable
+        gpgcheck: yes
+        gpgkey: https://download.docker.com/linux/centos/gpg
+        state: present
+
+    - name: Install Docker CE
+      package:
+        name: docker-ce
+        state: latest
+
+    - name: Start Docker service
+      service:
+        name: docker
+        state: started
+        enabled: yes
+        
+    - name: permission for docker
+      ansible.builtin.file:
+       path: /var/run/docker.sock
+       owner: root
+       group: docker
+       mode: "0666"
